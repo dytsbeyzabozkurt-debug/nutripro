@@ -1552,7 +1552,7 @@
         <div class="section-head"><div><h2>Kan Değerleri</h2><p class="hint">PDF’den otomatik çekilen değerler hatalı olabilir. Kaydetmeden önce mutlaka kontrol ediniz.</p></div></div>
         <div class="panel grid three">
           <label>Danışan<select id="bloodClient"></select></label>
-          <label>PDF Yükle<input id="bloodPdf" type="file" accept="application/pdf" onchange="handleBloodPdfUpload(this.files[0])" /></label>
+          <label>PDF Yükle<input id="bloodPdf" type="file" accept="application/pdf" /></label>
           <label>Test<select id="b_test"></select></label>
           <label>Değer<input id="b_value" type="number" step="0.01" /></label>
           <label>Birim<input id="b_unit" /></label>
@@ -1790,6 +1790,7 @@
 
   <div class="toast" id="toast" hidden></div>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
     const today = () => new Date().toISOString().slice(0, 10);
@@ -2411,7 +2412,17 @@
       if (!c) return $("measurementTable").innerHTML = '<div class="empty">Önce danışan seçiniz.</div>';
       $("measurementTable").innerHTML = c.measurements.length ? `<p class="hint">Hesaplar takip göstergesidir; tanı amacı taşımaz.</p><div class="table-wrap"><table><thead><tr><th>Tarih</th><th>Kilo</th><th>BKİ</th><th>Bel/Kalça</th><th>Yağ</th><th>Yağ kg</th><th>Kas kg/oran</th><th>Vücut suyu</th><th>Visseral</th><th>Kaynak</th><th>Not</th></tr></thead><tbody>${c.measurements.map(m => { const a = anthropometry(c, m); return `<tr><td>${esc(m.date)}</td><td>${esc(m.weight || "-")}</td><td>${esc(m.bmi || a.bmi)}</td><td>${esc(m.whr || a.whr)}</td><td>${esc(m.fat || "-")}</td><td>${esc(m.fatMass || "-")}</td><td>${esc(m.muscleMass || m.muscle || "-")}</td><td>${esc(m.bodyWater || "-")}</td><td>${esc(m.visceralFat || "-")}</td><td>${esc(m.source || "Manuel")}</td><td>${esc(m.note || "-")}</td></tr>`; }).join("")}</tbody></table></div>${segmentTable(latestBodyMeasurement(c) || {})}${renderMeasurementCharts(c)}` : '<div class="empty">Henüz ölçüm yok.</div>';
     }
-    function addBloodValue() { const c = selectedClient(); if (!c) return showToast("Önce danışan seçiniz.", true); const test = bloodTests.find(t => t[0] === $("b_test").value); const val = Number($("b_value").value); if (!Number.isFinite(val)) return showToast("Kan değeri sayı olmalı.", true); const st = bloodStatus(test, val); c.blood.push({ id: "b_" + Date.now(), key: test[0], label: test[1], value: val, unit: $("b_unit").value || test[2], date: $("b_date").value || today(), note: $("b_note").value, source: "Manuel", ...st }); $("b_value").value = ""; saveData(); renderBloodValues(); renderDashboard(); renderClients(); showToast("Kan değeri kaydedildi."); }
+    function addBloodValue() {
+      const c = selectedClient(); if (!c) return showToast("Önce danışan seçiniz.", true);
+      const test = bloodTests.find(t => t[0] === $("b_test").value);
+      const rawValue = $("b_value").value.trim();
+      if (!rawValue) return showToast("Değer alanı boş bırakılamaz.", true);
+      const val = parseNumber(rawValue);
+      if (!Number.isFinite(val)) return showToast("Kan değeri sayı olmalı.", true);
+      const st = bloodStatus(test, val);
+      c.blood.push({ id: "b_" + Date.now(), key: test[0], label: test[1], value: val, unit: $("b_unit").value || test[2], date: $("b_date").value || today(), note: $("b_note").value, source: "Manuel", ...st });
+      $("b_value").value = ""; saveData(); renderBloodValues(); renderDashboard(); renderClients(); showToast("Kan değeri kaydedildi.");
+    }
     function bloodTrend(c, b) { const arr = (c.blood || []).filter(x => x.key === b.key).sort((a, z) => String(a.date).localeCompare(String(z.date))); const idx = arr.findIndex(x => x.id === b.id); const prev = idx > 0 ? arr[idx - 1] : null; if (!prev) return "-"; const diff = round(Number(b.value) - Number(prev.value), 2); if (Math.abs(diff) < 0.01) return `${b.label} stabil görünüyor.`; return `${b.label} önceki ölçüme göre ${Math.abs(diff)} ${b.unit} ${diff > 0 ? "artmış" : "azalmış"} görünüyor.`; }
     function bloodRiskLevel(test, val) {
       if (!test || !Number.isFinite(Number(val))) return "watch";
@@ -2438,27 +2449,52 @@
           : "Referans aralığında görünüyor. Bu yorum tanı amacı taşımaz.";
       return { status, comment };
     }
+    const pdfReaderErrorMessage = "PDF okuyucu yüklenemedi. İnternet bağlantınızı veya CDN erişimini kontrol ediniz.";
+    const pdfWorkerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    function configurePdfJs() {
+      if (!window.pdfjsLib) return null;
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
+      return window.pdfjsLib;
+    }
+    function checkPdfReaderOnLoad() {
+      if (!configurePdfJs() && $("pdfStatus")) $("pdfStatus").textContent = pdfReaderErrorMessage;
+    }
     async function loadPdfJs() {
-      if (window.pdfjsLib) return window.pdfjsLib;
+      const ready = configurePdfJs();
+      if (ready) return ready;
       await new Promise((resolve, reject) => {
         const script = document.createElement("script");
         script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
         script.onload = resolve;
-        script.onerror = () => reject(new Error("pdf.js yüklenemedi"));
+        script.onerror = () => reject(new Error(pdfReaderErrorMessage));
         document.head.appendChild(script);
       });
-      window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-      return window.pdfjsLib;
+      const pdfjs = configurePdfJs();
+      if (!pdfjs) throw new Error(pdfReaderErrorMessage);
+      return pdfjs;
     }
     async function extractPdfText(file) {
       const pdfjs = await loadPdfJs();
-      const buffer = await file.arrayBuffer();
+      const buffer = new Uint8Array(await file.arrayBuffer());
       const pdf = await pdfjs.getDocument({ data: buffer }).promise;
       const pages = [];
       for (let p = 1; p <= pdf.numPages; p++) {
         const page = await pdf.getPage(p);
         const content = await page.getTextContent();
-        pages.push(content.items.map(item => item.str || "").join(" "));
+        const items = content.items
+          .map(item => ({ text: String(item.str || "").trim(), x: item.transform?.[4] || 0, y: item.transform?.[5] || 0 }))
+          .filter(item => item.text);
+        const grouped = [];
+        items.forEach(item => {
+          let line = grouped.find(row => Math.abs(row.y - item.y) < 2);
+          if (!line) grouped.push(line = { y: item.y, items: [] });
+          line.items.push(item);
+        });
+        const lineText = grouped
+          .sort((a, b) => b.y - a.y)
+          .map(row => row.items.sort((a, b) => a.x - b.x).map(item => item.text).join(" "))
+          .join("\n");
+        pages.push(lineText || items.map(item => item.text).join(" "));
       }
       return pages.join("\n").replace(/[ \t]+/g, " ").trim();
     }
@@ -2476,37 +2512,89 @@
         tsh: ["TSH", "Tiroid stimülan hormon"],
         alt: ["ALT", "SGPT"],
         ast: ["AST", "SGOT"],
-        hemoglobin: ["Hemoglobin", "HGB", "Hb"],
+        hemoglobin: ["Hemoglobin", "HGB"],
         crp: ["CRP", "C-reaktif protein"]
       };
     }
-    function parseNumber(v) { return Number(String(v).replace(",", ".")); }
-    function parsePdfBloodValues(text) {
-      const compact = text.replace(/\r/g, "\n");
-      const unit = "(mg\\/dL|mg\\/dl|ng\\/mL|ng\\/ml|pg\\/mL|pg\\/ml|µIU\\/mL|uIU\\/mL|mIU\\/L|mmol\\/L|g\\/dL|U\\/L|IU\\/L|%|mg\\/L)";
+    function parseNumber(v) {
+      const raw = String(v ?? "").trim();
+      if (!raw) return NaN;
+      const match = raw.replace(",", ".").match(/[<>]?\s*([0-9]{1,4}(?:\.[0-9]+)?)/);
+      return match ? Number(match[1]) : NaN;
+    }
+    const labUnitPattern = "(mg\\/dL|mg\\/dl|ng\\/mL|ng\\/ml|pg\\/mL|pg\\/ml|µIU\\/mL|μIU\\/mL|uIU\\/mL|mIU\\/L|mmol\\/L|g\\/dL|U\\/L|IU\\/L|%|mg\\/L)";
+    function labFold(v) { return fold(v).replace(/ı/g, "i"); }
+    function escapeRegExp(v) { return String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+    function bestLabCandidate(segment, defaultUnit) {
+      const re = new RegExp(`([<>]?\\s*[0-9]{1,4}(?:[,.][0-9]+)?)\\s*${labUnitPattern}?`, "giu");
+      const candidates = [];
+      let match;
+      while ((match = re.exec(segment))) {
+        const value = parseNumber(match[1]);
+        if (!Number.isFinite(value)) continue;
+        const before = labFold(segment.slice(Math.max(0, match.index - 34), match.index));
+        const after = segment.slice(match.index + match[0].length, match.index + match[0].length + 12);
+        if (/^\s*[-–—]\s*\d/.test(after) || /\d\s*[-–—]\s*$/.test(segment.slice(Math.max(0, match.index - 6), match.index))) continue;
+        if (!match[2] && /(tarih|date|yas|yaş)$/.test(before.trim())) continue;
+        let score = match[2] ? 3 : 1;
+        if (/(sonuc|sonuç|result|deger|değer|value|hasta)/.test(before)) score += 2;
+        if (/(referans|ref|aralik|aralık)/.test(before)) score -= 2;
+        candidates.push({ value, unit: match[2] || defaultUnit, score, index: match.index });
+      }
+      candidates.sort((a, b) => b.score - a.score || a.index - b.index);
+      return candidates[0] || null;
+    }
+    function extractLabValuesFromText(text) {
+      const lines = String(text || "").replace(/\r/g, "\n").split(/\n+/).map(line => line.trim()).filter(Boolean);
       const found = [];
       bloodTests.forEach(test => {
         const aliases = labAliases()[test[0]] || [test[1]];
-        for (const name of aliases) {
-          const safe = name.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s*");
-          const re = new RegExp(`(?:^|\\n|\\s)${safe}\\s*(?:[:=\\-]|sonuç|değer)?\\s*([^\\n]{0,70}?)([0-9]{1,4}(?:[,.][0-9]+)?)\\s*${unit}?`, "iu");
-          const match = compact.match(re);
-          if (match) {
+        let result = null;
+        for (let i = 0; i < lines.length && !result; i++) {
+          const foldedLine = labFold(lines[i]);
+          if (test[0] === "totalChol" && /\b(ldl|hdl)\b/.test(foldedLine)) continue;
+          for (const alias of aliases) {
+            const foldedAlias = labFold(alias);
+            const aliasIndex = foldedLine.indexOf(foldedAlias);
+            if (aliasIndex < 0) continue;
+            const beforeAlias = foldedLine[aliasIndex - 1] || "";
+            const afterAliasChar = foldedLine[aliasIndex + foldedAlias.length] || "";
+            if (/[a-z0-9]/.test(beforeAlias) || /[a-z0-9]/.test(afterAliasChar)) continue;
+            const afterAlias = lines[i].slice(aliasIndex + alias.length);
+            const segment = [afterAlias, lines[i + 1] || "", lines[i + 2] || ""].join(" ");
+            const candidate = bestLabCandidate(segment, test[2]);
+            if (candidate) {
+              const st = bloodStatus(test, candidate.value);
+              result = { id: "pdf_" + test[0], key: test[0], label: test[1], value: candidate.value, unit: candidate.unit, date: today(), confidence: candidate.score >= 3 ? "Yüksek" : "Kontrol gerekli", note: candidate.score >= 3 ? "PDF" : "PDF - kontrol gerekli", source: "PDF", include: true, ...st };
+              break;
+            }
+          }
+        }
+        if (!result) {
+          const compact = lines.join("\n");
+          for (const alias of aliases) {
+            const safe = escapeRegExp(alias.trim()).replace(/\s+/g, "\\s*");
+            const re = new RegExp(`(?:^|\\n|\\s)${safe}\\s*(?:[:=\\-]|sonuç|sonuc|değer|deger|result|value)?\\s*([^\\n]{0,90}?)([0-9]{1,4}(?:[,.][0-9]+)?)\\s*${labUnitPattern}?`, "iu");
+            const match = compact.match(re);
+            if (!match) continue;
             const value = parseNumber(match[2]);
             if (!Number.isFinite(value)) continue;
-            const parsedUnit = match[3] || test[2];
             const st = bloodStatus(test, value);
-            found.push({ id: "pdf_" + test[0], key: test[0], label: test[1], value, unit: parsedUnit, date: today(), note: "PDF", source: "PDF", include: true, ...st });
+            result = { id: "pdf_" + test[0], key: test[0], label: test[1], value, unit: match[3] || test[2], date: today(), confidence: "Kontrol gerekli", note: "PDF - kontrol gerekli", source: "PDF", include: true, ...st };
             break;
           }
         }
+        if (result) found.push(result);
       });
       return found;
+    }
+    function parsePdfBloodValues(text) {
+      return extractLabValuesFromText(text);
     }
     function renderParsedPdfValues() {
       const rows = state.parsedPdfValues;
       if (!rows.length) return $("pdfExtractedTable").innerHTML = '<div class="empty">Otomatik değer bulunamadı, manuel giriş yapabilirsiniz.</div>';
-      $("pdfExtractedTable").innerHTML = `<div class="table-wrap"><table><thead><tr><th>Kayda dahil et</th><th>Test</th><th>Değer</th><th>Birim</th><th>Tarih</th><th>Not</th></tr></thead><tbody>${rows.map((r, i) => `<tr><td><input type="checkbox" class="pdfInclude" data-i="${i}" ${r.include ? "checked" : ""}></td><td>${esc(r.label)}</td><td><input class="pdfValue" data-i="${i}" type="number" step="0.01" value="${esc(r.value)}"></td><td><input class="pdfUnit" data-i="${i}" value="${esc(r.unit)}"></td><td><input class="pdfDate" data-i="${i}" type="date" value="${esc(r.date)}"></td><td><input class="pdfNote" data-i="${i}" value="${esc(r.note || "PDF")}"></td></tr>`).join("")}</tbody></table></div>`;
+      $("pdfExtractedTable").innerHTML = `<div class="table-wrap"><table><thead><tr><th>Kayda dahil et</th><th>Test</th><th>Değer</th><th>Birim</th><th>Tarih</th><th>Güven durumu</th><th>Not</th></tr></thead><tbody>${rows.map((r, i) => `<tr><td><input type="checkbox" class="pdfInclude" data-i="${i}" ${r.include ? "checked" : ""}></td><td>${esc(r.label)}</td><td><input class="pdfValue" data-i="${i}" type="number" step="0.01" value="${esc(r.value)}"></td><td><input class="pdfUnit" data-i="${i}" value="${esc(r.unit)}"></td><td><input class="pdfDate" data-i="${i}" type="date" value="${esc(r.date)}"></td><td><select class="pdfConfidence" data-i="${i}"><option ${r.confidence !== "Kontrol gerekli" ? "selected" : ""}>Yüksek</option><option ${r.confidence === "Kontrol gerekli" ? "selected" : ""}>Kontrol gerekli</option></select></td><td><input class="pdfNote" data-i="${i}" value="${esc(r.note || "PDF")}"></td></tr>`).join("")}</tbody></table></div>`;
     }
     function syncParsedPdfFromTable() {
       state.parsedPdfValues.forEach((r, i) => {
@@ -2514,20 +2602,24 @@
         r.value = parseNumber(document.querySelector(`.pdfValue[data-i="${i}"]`)?.value);
         r.unit = document.querySelector(`.pdfUnit[data-i="${i}"]`)?.value || r.unit;
         r.date = document.querySelector(`.pdfDate[data-i="${i}"]`)?.value || today();
+        r.confidence = document.querySelector(`.pdfConfidence[data-i="${i}"]`)?.value || r.confidence || "Kontrol gerekli";
         r.note = document.querySelector(`.pdfNote[data-i="${i}"]`)?.value || "PDF";
       });
     }
     function saveParsedPdfValues() {
       const c = ensureSelectedClient(); if (!c) return;
       syncParsedPdfFromTable();
+      if (state.parsedPdfValues.some(r => r.include && !Number.isFinite(Number(r.value)))) return showToast("Değer alanı boş bırakılamaz.", true);
       const selected = state.parsedPdfValues.filter(r => r.include && Number.isFinite(Number(r.value)));
       if (!selected.length) return showToast("Kayda dahil edilecek geçerli değer seçiniz.", true);
       c.blood.push(...selected.map(r => ({ ...r, id: "b_pdf_" + Date.now() + Math.random(), source: "PDF", ...bloodStatus(bloodTests.find(t => t[0] === r.key), Number(r.value)) })));
       saveData(); renderBloodValues(); renderDashboard(); renderClients(); showToast("PDF değerleri seçili danışana kaydedildi.");
     }
-    async function handleBloodPdfUpload(file) {
-      const c = selectedClient(); if (!c) return showToast("Önce danışan seçiniz.", true);
-      if (!file) return;
+    function selectedBloodPdfFile() { return $("bloodPdf")?.files?.[0] || null; }
+    async function handleBloodPdfUpload(file = selectedBloodPdfFile()) {
+      const c = ensureSelectedClient(); if (!c) return;
+      if (!file) return showToast("PDF dosyası seçiniz.", true);
+      if (file.type && file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) return showToast("Lütfen PDF dosyası seçiniz.", true);
       $("pdfStatus").textContent = "PDF okunuyor...";
       $("pdfTextOutput").value = "";
       state.parsedPdfValues = [];
@@ -2539,11 +2631,11 @@
           $("pdfStatus").textContent = "Bu PDF taranmış/görüntü olabilir, metin okunamadı. Lütfen değerleri manuel giriniz.";
           return showToast("PDF metni okunamadı.", true);
         }
-        state.parsedPdfValues = parsePdfBloodValues(text);
+        state.parsedPdfValues = extractLabValuesFromText($("pdfTextOutput").value);
         renderParsedPdfValues();
         $("pdfStatus").textContent = state.parsedPdfValues.length ? `${state.parsedPdfValues.length} kan değeri bulundu. Kaydetmeden önce kontrol edip düzenleyebilirsiniz.` : "Otomatik değer bulunamadı, manuel giriş yapabilirsiniz.";
       } catch (err) {
-        $("pdfStatus").textContent = "PDF okunamadı. Dosya bozuk olabilir veya pdf.js yüklenemedi.";
+        $("pdfStatus").textContent = err.message === pdfReaderErrorMessage ? pdfReaderErrorMessage : "PDF okunamadı. Dosya bozuk olabilir veya pdf.js yüklenemedi.";
         showToast("PDF okunamadı.", true);
       }
     }
@@ -3124,7 +3216,12 @@
       $("saveClientBtn").onclick = addClient; $("cancelEditBtn").onclick = () => { state.editingId = null; $("clientForm").reset(); $("clientFormTitle").textContent = "Yeni Danışan"; $("cancelEditBtn").hidden = true; };
       $("clientSearch").oninput = renderClients; $("goalFilter").onchange = renderClients; $("clientSort").onchange = renderClients;
       ["measurementClient", "bloodClient", "dietClient"].forEach(id => $(id).onchange = e => setSelected(e.target.value));
-      $("addMeasurementBtn").onclick = addMeasurement; $("biaPdf").onchange = e => handleBiaPdfUpload(e.target.files[0]); $("saveBiaBtn").onclick = saveParsedBiaValues; $("addBloodBtn").onclick = addBloodValue; $("manualBloodBtn").onclick = () => $("b_value").focus(); $("bloodPdf").onchange = e => handleBloodPdfUpload(e.target.files[0]); $("savePdfBloodBtn").onclick = saveParsedPdfValues;
+      checkPdfReaderOnLoad();
+      $("addMeasurementBtn").onclick = addMeasurement; $("biaPdf").onchange = e => handleBiaPdfUpload(e.target.files[0]); $("saveBiaBtn").onclick = saveParsedBiaValues;
+      $("manualBloodBtn").onclick = () => selectedBloodPdfFile() ? handleBloodPdfUpload(selectedBloodPdfFile()) : $("b_value").focus();
+      $("addBloodBtn").onclick = () => selectedBloodPdfFile() ? handleBloodPdfUpload(selectedBloodPdfFile()) : addBloodValue();
+      $("bloodPdf").onchange = e => handleBloodPdfUpload(e.target.files[0]);
+      $("savePdfBloodBtn").onclick = saveParsedPdfValues;
       $("calcEnergyBtn").onclick = calculateEnergy; $("saveEnergyBtn").onclick = saveEnergy; $("addFoodBtn").onclick = addFoodToMeal; $("applyTemplateBtn").onclick = applyMealTemplate; $("applyDayTemplateBtn").onclick = applyDayTemplate; $("addAlternativeBtn").onclick = addAlternative; $("saveDietBtn").onclick = saveDietPlan; $("previewReportBtn").onclick = previewDietReport; $("clearDietBtn").onclick = clearDietPlan; $("calcWaterBtn").onclick = calcWater; $("saveWaterBtn").onclick = saveWater;
       $("addPlanExchangeBtn").onclick = addPlanExchange; $("cancelPlanExchangeEditBtn").onclick = clearPlanExchangeForm;
       $("foodSearchDiet").oninput = renderFoodSelectDiet; $("dietFoodCategory").onchange = renderFoodSelectDiet; $("foodSearch").oninput = renderFoodDatabase; $("foodGroup").onchange = renderFoodDatabase; $("foodTag").onchange = renderFoodDatabase;
@@ -3154,6 +3251,13 @@
     - Besin kartları ve öğün kartları düzgün hizalanıyor mu?
     - Sağ analiz paneli ekrana sığıyor mu?
     - Rapor, ayarlar, kan değerleri ekranları bozulmadan duruyor mu?
+    - Test 1: PDF dosyası seçilince okuma otomatik başlıyor mu?
+    - Test 2: Okunan PDF metni textarea’da görünüyor mu?
+    - Test 3: Glukoz, LDL, HDL, B12, TSH gibi değerler tabloya düşüyor mu?
+    - Test 4: Bulunan değerler düzenlenebiliyor mu?
+    - Test 5: Seçili danışana kaydedince kaynak PDF olarak geçmişe ekleniyor mu?
+    - Test 6: Boş değer artık 0 olarak kaydedilmiyor mu?
+    - Test 7: Taranmış/görüntü PDF yüklenirse uygun uyarı çıkıyor mu?
   -->
 </body>
 </html>
